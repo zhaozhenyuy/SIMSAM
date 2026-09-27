@@ -1,0 +1,21 @@
+data:
+  batch_size: 1
+  num_workers: 1
+  train_ann: /root/autodl-tmp/MemSAM/camus_dino/test/test.csv
+  train_dir: /root/autodl-tmp/MemSAM/camus_dino/test/images
+  val_ann: /root/autodl-tmp/MemSAM/camus_dino/test/test.csv
+  val_dir: /root/autodl-tmp/MemSAM/camus_dino/test/images
+
+model:
+  config_path: /root/autodl-tmp/MemSAM/groundingdino/config/GroundingDINO_SwinT_OGC.py
+  lora_weights: /root/autodl-tmp/MemSAM/weights/20260327_1724/best_model.pth
+  weights_path: /root/autodl-tmp/MemSAM/groundingdino_swint_ogc.pth
+
+training:
+  learning_rate: 0.01
+  num_epochs: 200
+  save_dir: /root/autodl-tmp/MemSAM/weights
+  save_frequency: 5
+  use_lora: True
+  visualization_frequency: 5
+  warmup_epochs: 5

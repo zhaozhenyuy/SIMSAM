@@ -1,0 +1,30 @@
+# SIMSAM environment (Python 3.10). Install the matching CUDA PyTorch wheels first.
+# Building groundingdino._C with setup.py also requires a CUDA toolkit/compiler.
+torch==2.5.1
+torchvision==0.20.1
+numpy==1.26.4
+scipy==1.11.4
+pandas==2.2.2
+Pillow==10.3.0
+opencv-python==4.10.0.84
+matplotlib==3.8.4
+seaborn==0.13.2
+scikit-image==0.22.0
+imageio==2.34.2
+SimpleITK==2.3.1
+MedPy==0.5.2
+hausdorff==0.2.6
+batchgenerators==0.25.1
+easydict==1.13
+einops==0.7.0
+timm==0.9.16
+transformers==4.51.3
+peft==0.15.2
+ema-pytorch==0.7.7
+PyYAML==6.0.1
+addict==2.4.0
+yapf==0.40.1
+supervision==0.6.0
+pycocotools==2.0.8
+termcolor==2.4.0
+setuptools==65.5.1

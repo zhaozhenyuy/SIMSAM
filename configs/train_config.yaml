@@ -1,0 +1,21 @@
+data:
+  train_dir: data/dino/camus/train/images
+  train_ann: data/dino/camus/train/train.csv
+  val_dir: data/dino/camus/val/images
+  val_ann: data/dino/camus/val/val.csv
+  batch_size: 4
+  num_workers: 8
+
+model:
+  config_path: groundingdino/config/GroundingDINO_SwinT_OGC.py
+  weights_path: weights/groundingdino_swint_ogc.pth
+
+training:
+  num_epochs: 100
+  learning_rate: 1e-3
+  save_dir: weights/dino_lora_camus
+  save_frequency: 5
+  warmup_epochs: 5
+  use_lora: true
+  visualization_frequency: 5
+  patient: 350
