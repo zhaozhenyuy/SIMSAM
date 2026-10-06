@@ -48,7 +48,7 @@ def setup_terminal_logger(args, opt):
     return log_file
 
 
-def parse_args(argv=None):
+def parse_args(argv=None, defaults=None):
     parser = argparse.ArgumentParser(description="Evaluate MemSAM variants.")
     parser.add_argument("--modelname", type=str, default="SharedGroundedMemSAM")
     parser.add_argument("--load_path", type=str, required=True)
@@ -85,15 +85,18 @@ def parse_args(argv=None):
     parser.add_argument("--dino_config", type=str, default="groundingdino/config/GroundingDINO_SwinT_OGC.py")
     parser.add_argument("--dino_weights", type=str, default="weights/groundingdino_swint_ogc.pth")
     parser.add_argument("--dino_use_lora", action="store_true", default=False)
+    parser.add_argument("--disable_dino_lora", action="store_false", dest="dino_use_lora")
     parser.add_argument("--dino_lora_weights", type=str, default="weights/best_model.pth")
     parser.add_argument("--disable_dino_prompt", action="store_true", default=False)
     parser.add_argument("--dino_box_th", type=float, default=0.35)
     parser.add_argument("--dino_text_th", type=float, default=0.25)
     parser.add_argument("--train_shared_dino", action="store_true", default=False)
     parser.add_argument("--enable_self_prompt", action="store_true", default=False)
-    parser.add_argument("--enable_apfe", action="store_true", default=False)
+    parser.add_argument("--enable_apfe", action="store_true", default=True)
+    parser.add_argument("--disable_apfe", action="store_false", dest="enable_apfe")
     parser.add_argument("--apfe_kernel_size", type=int, default=7)
     parser.add_argument("--enable_phase_memory", action="store_true", default=False)
+    parser.add_argument("--disable_phase_memory", action="store_false", dest="enable_phase_memory")
     parser.add_argument("--phase_memory_scale", type=float, default=0.1)
     parser.add_argument("--es_loss_weight", type=float, default=1.0)
     parser.add_argument("--enable_es_shape_loss", action="store_true", default=False)
@@ -134,6 +137,8 @@ def parse_args(argv=None):
                         help="CAMUS paired-view LVEF: corr, signed Bias, MAE and 95%% LoA; no PSD.")
     parser.add_argument("--clinical_output_dir", type=str, default="",
                         help="New directory for patient LVEF pairs and summary; default is a timestamped lvef directory.")
+    if defaults:
+        parser.set_defaults(**defaults)
     return parser.parse_args(argv)
 
 
@@ -160,8 +165,9 @@ def load_checkpoint(model, load_path, device):
     return model.load_state_dict(state_dict, strict=False)
 
 
-def main():
-    args = parse_args()
+def main(args=None):
+    if args is None:
+        args = parse_args()
     opt = get_config(args.task)
     configure_release(args, opt, training=False)
     if args.data_path:

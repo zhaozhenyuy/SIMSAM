@@ -201,7 +201,7 @@ def add_es_shape_loss(train_loss, pred, masks, args):
     return train_loss + shape_loss
 
 
-def main():
+def parse_args(argv=None, defaults=None):
 
     #  ============================================================================= parameters setting ====================================================================================
 
@@ -237,9 +237,11 @@ def main():
     parser.add_argument('--self_prompt_box_loss_weight', type=float, default=1.0)
     parser.add_argument('--self_prompt_warmup_epochs', type=int, default=0)
     parser.add_argument('--train_shared_dino', action="store_true")
-    parser.add_argument('--enable_apfe', action="store_true")
+    parser.add_argument('--enable_apfe', action="store_true", default=True)
+    parser.add_argument('--disable_apfe', action="store_false", dest='enable_apfe')
     parser.add_argument('--apfe_kernel_size', type=int, default=7)
     parser.add_argument('--enable_phase_memory', action="store_true")
+    parser.add_argument('--disable_phase_memory', action="store_false", dest='enable_phase_memory')
     parser.add_argument('--phase_memory_scale', type=float, default=0.1)
     parser.add_argument('--es_loss_weight', type=float, default=1.0)
     parser.add_argument('--enable_es_shape_loss', action="store_true")
@@ -265,15 +267,24 @@ def main():
     parser.add_argument('--dino_config', type=str, default='groundingdino/config/GroundingDINO_SwinT_OGC.py')
     parser.add_argument('--dino_weights', type=str, default='weights/groundingdino_swint_ogc.pth')
     parser.add_argument('--dino_use_lora', action="store_true")
+    parser.add_argument('--disable_dino_lora', action="store_false", dest='dino_use_lora')
     parser.add_argument('--dino_lora_weights', type=str, default='weights/best_model.pth')
     parser.add_argument('--disable_dino_prompt', action="store_true", help='Disable SharedGroundedMemSAM internal DINO point grounding.')
     parser.add_argument('--dino_box_th', type=float, default=0.35)
     parser.add_argument('--dino_text_th', type=float, default=0.25)
-    args = parser.parse_args()
+    if defaults:
+        parser.set_defaults(**defaults)
+    args = parser.parse_args(argv)
     if args.modelname == "SelfPromptMemSAM":
         args.enable_self_prompt = True
     if args.grad_clip_norm <= 0.0 and (args.enable_osu_prompt or args.enable_osu_state):
         args.grad_clip_norm = 1.0
+    return args
+
+
+def main(args=None):
+    if args is None:
+        args = parse_args()
 
     # ==================================================parameters setting==================================================
 

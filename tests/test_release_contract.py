@@ -11,6 +11,8 @@ from torch.utils.data import DataLoader
 
 import testmemsam
 import trainmemsam
+import testsimsam
+import trainsimsam
 from models.segment_anything_memsam.modeling.mem import Mem
 from utils.loss_functions.sam_loss import get_criterion
 from utils.release_checkpoints import load_release_checkpoint
@@ -20,16 +22,71 @@ from utils.visualization import _write_image
 
 
 class ReleaseContractTests(unittest.TestCase):
-    def test_test_defaults_match_reference_except_mamba(self):
+    def test_test_defaults_preserve_losses_and_disable_mamba(self):
         args = testmemsam.parse_args(['--load_path', 'model.pth'])
         self.assertFalse(args.reinforce)
         self.assertTrue(args.enable_memory)
         self.assertFalse(args.enable_phase_memory)
-        self.assertFalse(args.enable_apfe)
+        self.assertTrue(args.enable_apfe)
         self.assertFalse(args.enable_es_shape_loss)
         self.assertEqual(args.es_loss_weight, 1.)
         self.assertEqual(args.es_boundary_loss_weight, .2)
         self.assertEqual(args.es_area_loss_weight, .1)
+
+    def test_simple_training_command(self):
+        args = trainsimsam.parse_args(['--data_path', 'data/camus'])
+        self.assertEqual(args.modelname, 'SharedGroundedMemSAM')
+        self.assertTrue(args.enable_memory)
+        self.assertTrue(args.semi)
+        self.assertTrue(args.disable_point_prompt)
+        self.assertFalse(args.disable_dino_prompt)
+        self.assertTrue(args.dino_use_lora)
+        self.assertTrue(args.enable_apfe)
+        self.assertTrue(args.enable_phase_memory)
+        self.assertFalse(args.reinforce)
+        self.assertFalse(args.enable_es_shape_loss)
+        self.assertEqual(args.base_lr, .0001)
+        self.assertFalse(args.warmup)
+        self.assertIsNone(args.epochs)
+        self.assertEqual(args.es_loss_weight, 1.)
+        self.assertEqual(args.es_boundary_loss_weight, .2)
+        self.assertEqual(args.es_area_loss_weight, .1)
+
+    def test_simple_testing_command(self):
+        args = testsimsam.parse_args(['--data_path', 'data/camus', '--load_path', 'model.pth'])
+        self.assertEqual(args.modelname, 'SharedGroundedMemSAM')
+        self.assertTrue(args.enable_memory)
+        self.assertTrue(args.disable_point_prompt)
+        self.assertTrue(args.dino_use_lora)
+        self.assertTrue(args.enable_apfe)
+        self.assertTrue(args.enable_phase_memory)
+        self.assertFalse(args.reinforce)
+        self.assertFalse(args.semi)
+        self.assertFalse(args.compute_ef)
+
+    def test_echo_testing_uses_only_endpoints(self):
+        for task in ('EchoNet_Video', 'EchoDynamic', 'EchoDynamic_Video'):
+            args = testsimsam.parse_args(['--task', task, '--load_path', 'model.pth'])
+            self.assertTrue(args.semi)
+            self.assertFalse(args.compute_ef)
+
+    def test_simple_entry_options_can_be_overridden(self):
+        options = ['--disable_apfe', '--disable_phase_memory', '--disable_dino_lora']
+        for args in (trainsimsam.parse_args(options),
+                     testsimsam.parse_args(['--load_path', 'model.pth'] + options)):
+            self.assertFalse(args.enable_apfe)
+            self.assertFalse(args.enable_phase_memory)
+            self.assertFalse(args.dino_use_lora)
+        args = testsimsam.parse_args(['--load_path', 'model.pth', '--semi'])
+        self.assertTrue(args.semi)
+
+    def test_readme_is_concise_and_matches_entry_points(self):
+        text = (Path(__file__).resolve().parents[1] / 'README.md').read_text(encoding='utf-8')
+        for label in ('94.04', 'APFE', 'LVEF'):
+            self.assertNotIn(label, text)
+        self.assertIn('python trainsimsam.py --data_path DATA_ROOT', text)
+        self.assertIn('python testsimsam.py --data_path DATA_ROOT --load_path weights/simsam_best.pth', text)
+        self.assertLess(len(text.splitlines()), 100)
 
     def test_only_mamba_checkpoint_tensors_are_ignored(self):
         model = nn.Linear(2, 1)
