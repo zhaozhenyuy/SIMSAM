@@ -1,5 +1,6 @@
 #%%
 import os
+import argparse
 from collections import defaultdict
 import torch
 from torch.utils.data import DataLoader
@@ -20,6 +21,11 @@ from groundingdino.datasets.dataset import GroundingDINODataset
 from groundingdino.util.losses import SetCriterion
 from config import ConfigurationManager, DataConfig, ModelConfig
 from peft import get_peft_model_state_dict
+from utils.runtime import project_path
+
+
+def collate_dino(batch):
+    return tuple(zip(*batch))
 
 #%%
 # Ignore tokenizer warning
@@ -50,7 +56,7 @@ def setup_data_loaders(config: DataConfig) -> tuple[DataLoader, DataLoader]:
         batch_size=config.batch_size,
         shuffle=True,
         num_workers=config.num_workers,
-        collate_fn=lambda x: tuple(zip(*x))
+        collate_fn=collate_dino
     )
     
     val_loader = DataLoader(
@@ -58,7 +64,7 @@ def setup_data_loaders(config: DataConfig) -> tuple[DataLoader, DataLoader]:
         batch_size=1, 
         shuffle=False,
         num_workers=1,
-        collate_fn=lambda x: tuple(zip(*x))
+        collate_fn=collate_dino
     )
     
     return train_loader, val_loader
@@ -252,7 +258,12 @@ def train(config_path: str, save_dir: Optional[str] = None) -> None:
         save_dir: Optional override for save directory
     """
 
-    data_config, model_config, training_config = ConfigurationManager.load_config(config_path)
+    data_config, model_config, training_config = ConfigurationManager.load_config(project_path(config_path))
+    for name in ('train_dir', 'train_ann', 'val_dir', 'val_ann'):
+        setattr(data_config, name, project_path(getattr(data_config, name)))
+    model_config.config_path = project_path(model_config.config_path)
+    model_config.weights_path = project_path(model_config.weights_path)
+    training_config.save_dir = project_path(training_config.save_dir)
 
     model = setup_model(model_config, training_config.use_lora)
     
@@ -424,7 +435,14 @@ def train(config_path: str, save_dir: Optional[str] = None) -> None:
 
 #%%
 if __name__ == "__main__":
-    # lower_file_names()
-    train('configs/train_config.yaml')
+    parser = argparse.ArgumentParser(description="Train GroundingDINO with a YAML config.")
+    parser.add_argument(
+        "--config",
+        type=str,
+        default="configs/train_config.yaml",
+        help="Path to train_config.yaml.",
+    )
+    args = parser.parse_args()
+    train(args.config)
 
 # %%

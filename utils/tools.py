@@ -80,40 +80,6 @@ def corr(x, y):
     corr = A / B
     return corr
 
-
-def bootstrap_corr(x, y, repeats=2000, seed=1234):
-    """Patient-level bootstrap uncertainty for the Pearson correlation."""
-    x = np.asarray(x, dtype=np.float64).reshape(-1)
-    y = np.asarray(y, dtype=np.float64).reshape(-1)
-    if x.shape != y.shape or x.size < 3:
-        raise ValueError("bootstrap_corr requires at least three paired values")
-    if repeats < 2:
-        raise ValueError("bootstrap_corr requires at least two repeats")
-
-    rng = np.random.default_rng(seed)
-    indices = rng.integers(0, x.size, size=(repeats, x.size))
-    sampled_x = x[indices]
-    sampled_y = y[indices]
-    centered_x = sampled_x - sampled_x.mean(axis=1, keepdims=True)
-    centered_y = sampled_y - sampled_y.mean(axis=1, keepdims=True)
-    numerator = np.mean(centered_x * centered_y, axis=1)
-    denominator = sampled_x.std(axis=1) * sampled_y.std(axis=1)
-    valid = denominator > 0
-    values = numerator[valid] / denominator[valid]
-    if values.size < 2:
-        raise RuntimeError("Too few valid bootstrap correlation samples")
-
-    ci95 = np.percentile(values, [2.5, 97.5])
-    return {
-        'mean': float(values.mean()),
-        'std': float(values.std(ddof=1)),
-        'ci95_lower': float(ci95[0]),
-        'ci95_upper': float(ci95[1]),
-        'repeats': int(repeats),
-        'valid_repeats': int(values.size),
-        'seed': int(seed),
-    }
-
 def bias(x, y):
     '''
         x : gt

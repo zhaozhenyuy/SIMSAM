@@ -1,8 +1,8 @@
 data:
-  train_dir: data/dino/camus/train/images
-  train_ann: data/dino/camus/train/train.csv
-  val_dir: data/dino/camus/val/images
-  val_ann: data/dino/camus/val/val.csv
+  train_dir: data/camus_dino/train/images
+  train_ann: data/camus_dino/train/train.csv
+  val_dir: data/camus_dino/val/images
+  val_ann: data/camus_dino/val/val.csv
   batch_size: 4
   num_workers: 8
 
@@ -13,7 +13,7 @@ model:
 training:
   num_epochs: 100
   learning_rate: 1e-3
-  save_dir: weights/dino_lora_camus
+  save_dir: weights
   save_frequency: 5
   warmup_epochs: 5
   use_lora: true

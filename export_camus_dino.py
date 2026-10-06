@@ -215,8 +215,8 @@ def export_split(split, root_dir, out_root, resize=True):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--root", default="data/CAMUS_public")
-    parser.add_argument("--out", default="data/dino/camus")
+    parser.add_argument("--root", default="/root/autodl-tmp/MemSAM/CAMUS_public")
+    parser.add_argument("--out", default="/root/autodl-tmp/MemSAM/camus_dino")
     parser.add_argument("--no_resize", action="store_true")
     args = parser.parse_args()
 

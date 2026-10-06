@@ -1,5 +1,4 @@
 # this file is utilized to evaluate the models from different mode: 2D-slice level, 2D-patient level, 3D-patient level
-from tkinter import image_names
 from torch.autograd import Variable
 from torch.utils.data import DataLoader
 import os
@@ -19,8 +18,147 @@ from utils.generate_prompts import get_click_prompt
 from utils.compute_ef import compute_left_ventricle_volumes
 import time
 import pandas as pd
-from utils.tools import corr, bias, std, bootstrap_corr
-from scipy import stats
+from utils.lvef_evaluation import (
+    record_camus_endpoints, save_camus_lvef, validate_clinical_request,
+)
+from easydict import EasyDict
+from groundingdino.util.inference import load_model, predict as dino_predict
+_DINO_MODEL = None
+
+def _surface_metric_fallback(pred_mask, gt_mask, voxelspacing=None):
+    pred_has_object = np.any(pred_mask > 0)
+    gt_has_object = np.any(gt_mask > 0)
+    if not pred_has_object and not gt_has_object:
+        return 0.0, 0.0
+
+    spacing = np.asarray(voxelspacing if voxelspacing is not None else (1.0, 1.0), dtype=np.float32).reshape(-1)
+    if spacing.size == 0:
+        spacing = np.ones(2, dtype=np.float32)
+    if spacing.size == 1:
+        spacing = np.repeat(spacing, 2)
+    spacing = spacing[:2]
+    shape = np.asarray(pred_mask.shape[-2:], dtype=np.float32)
+    diagonal = float(np.linalg.norm(np.maximum(shape - 1.0, 1.0) * spacing))
+    return diagonal, diagonal
+
+def _safe_surface_metrics(pred_mask, gt_mask, voxelspacing=None, context=""):
+    try:
+        return (
+            medpy_hd95(pred_mask, gt_mask, voxelspacing=voxelspacing),
+            medpy_assd(pred_mask, gt_mask, voxelspacing=voxelspacing),
+        )
+    except RuntimeError as exc:
+        hd95, assd = _surface_metric_fallback(pred_mask, gt_mask, voxelspacing)
+        if context:
+            print(f"[WARN] Empty mask in surface metric at {context}: {exc}. Use fallback={hd95:.4f}.")
+        else:
+            print(f"[WARN] Empty mask in surface metric: {exc}. Use fallback={hd95:.4f}.")
+        return hd95, assd
+
+def _get_seg_threshold(args):
+    return float(getattr(args, "seg_threshold", 0.6))
+
+def _get_eval_spacing_scale(args):
+    return float(getattr(args, "eval_spacing_scale", 1.0))
+
+def _print_low_dice_case(dice, pred_prob, seg, gt, image_name, frame_i, args):
+    threshold = float(getattr(args, "debug_low_dice_threshold", 0.05))
+    if threshold <= 0.0 or float(dice) >= threshold:
+        return
+    prob_map = pred_prob[0, frame_i]
+    pred_area = int(seg[0, frame_i].sum())
+    gt_area = int((gt[0, frame_i] > 0).sum())
+    print(
+        "[LOW_DICE]",
+        f"name={image_name}",
+        f"frame={frame_i}",
+        f"dice={float(dice):.6f}",
+        f"prob_max={float(prob_map.max()):.6f}",
+        f"prob_mean={float(prob_map.mean()):.6f}",
+        f"pred_area={pred_area}",
+        f"gt_area={gt_area}",
+        f"seg_th={_get_seg_threshold(args):.3f}",
+    )
+
+def _print_high_hd_case(hd95, assd, dice, pred_prob, seg, gt, image_name, frame_i, args):
+    threshold = float(getattr(args, "debug_high_hd_threshold", 0.0))
+    if threshold <= 0.0 or float(hd95) < threshold:
+        return
+    prob_map = pred_prob[0, frame_i]
+    pred_area = int(seg[0, frame_i].sum())
+    gt_area = int((gt[0, frame_i] > 0).sum())
+    print(
+        "[HIGH_HD]",
+        f"name={image_name}",
+        f"frame={frame_i}",
+        f"dice={float(dice):.6f}",
+        f"hd95={float(hd95):.6f}",
+        f"assd={float(assd):.6f}",
+        f"prob_max={float(prob_map.max()):.6f}",
+        f"prob_mean={float(prob_map.mean()):.6f}",
+        f"pred_area={pred_area}",
+        f"gt_area={gt_area}",
+        f"seg_th={_get_seg_threshold(args):.3f}",
+    )
+
+def _is_self_prompt_model(args):
+    return getattr(args, "modelname", "") == "SelfPromptMemSAM" or getattr(args, "enable_self_prompt", False)
+
+def _is_shared_grounded_model(args):
+    return getattr(args, "modelname", "") == "SharedGroundedMemSAM"
+
+def _get_dino_model(args, opt):
+    global _DINO_MODEL
+    if _DINO_MODEL is not None:
+        return _DINO_MODEL
+    dino_cfg = EasyDict(
+        config_path=args.dino_config,
+        weights_path=args.dino_weights,
+        lora_weigths=args.dino_lora_weights,
+    )
+    _DINO_MODEL = load_model(
+        model_config=dino_cfg,
+        use_lora=getattr(args, "dino_use_lora", False),
+        device=str(opt.device),
+        strict=False
+    ).to(opt.device)
+    _DINO_MODEL.eval()
+    return _DINO_MODEL
+
+def _forward_camus_video(model, imgs, pt_dino):
+    return model(imgs, pt_dino, None)
+
+def _bidirectional_endpoint_forward(model, imgs, pt_dino, args):
+    pred_forward = _forward_camus_video(model, imgs, pt_dino)
+
+    if not getattr(args, "bidirectional_endpoint_eval", False):
+        return pred_forward
+
+    if not _is_shared_grounded_model(args) and not getattr(args, "_bidir_prompt_warned", False):
+        print(
+            "[BIDIR EVAL] Reversed endpoint grounding is intended for SharedGroundedMemSAM. "
+            "For other models the reversed pass runs without an explicit ES prompt."
+        )
+        setattr(args, "_bidir_prompt_warned", True)
+
+    # Reverse the temporal order so original ES becomes the first frame.
+    # SharedGroundedMemSAM will ground that new first frame internally when pt=None.
+    reversed_imgs = torch.flip(imgs, dims=[1])
+    reversed_pt = None if _is_shared_grounded_model(args) else None
+    pred_backward = _forward_camus_video(model, reversed_imgs, reversed_pt)
+    pred_backward = torch.flip(pred_backward, dims=[1])
+
+    fusion = getattr(args, "bidirectional_fusion", "endpoint")
+    if fusion == "backward":
+        return pred_backward
+    if fusion == "mean":
+        return 0.5 * (pred_forward + pred_backward)
+
+    pred = 0.5 * (pred_forward + pred_backward)
+    pred[:, 0] = pred_forward[:, 0]
+    pred[:, -1] = pred_backward[:, -1]
+    return pred
+
 def fix_bn(m):
     classname = m.__class__.__name__
     if classname.find('BatchNorm') != -1:
@@ -578,12 +716,69 @@ def eval_camus(valloader, model, criterion, opt, args):
         b, t, c, h, w = imgs.shape
 
         image_filename = datapack['image_name']
-        patient_name = image_filename[0].split('.')[0].split('_')[0]
-        view = image_filename[0].split('.')[0].split('_')[1]
-        gt_efs[patient_name] = datapack['ef'].detach().cpu().numpy()[0]
+        # Reference EF is read only for optional clinical evaluation.
+        class_id = datapack['class_id']
+        pt_dino = None
+
+        # 如果你的实验定义是不使用人工/GT点提示，那这里就不要再走 get_click_prompt
+        # 直接统一为 None
+        pt = None
+
+        if getattr(args, "enable_box_prompt", False) and not _is_self_prompt_model(args) and not _is_shared_grounded_model(args):
+            dino_model = _get_dino_model(args, opt)
+            frame0 = imgs[:, 0]  # 首帧: (B,C,256,256)
+
+            boxes, scores, phrases = dino_predict(
+                model=dino_model,
+                image=frame0[0],
+                caption=args.box_prompt_text,
+                box_threshold=args.dino_box_th,
+                text_threshold=args.dino_text_th,
+                device=str(opt.device),
+            )
+
+            if boxes is not None and len(boxes) > 0:
+                from torchvision.ops import box_convert
+
+                # normalized cxcywh -> pixel xyxy
+                xyxy = box_convert(boxes=boxes, in_fmt="cxcywh", out_fmt="xyxy")
+                xyxy = xyxy * torch.tensor([256, 256, 256, 256], dtype=xyxy.dtype, device=xyxy.device)
+
+                best = torch.argmax(scores)
+                best_box = xyxy[best]   # (4,)
+
+                x1, y1, x2, y2 = best_box
+                px = 0.5 * (x1 + x2)
+                py = 0.5 * (y1 + y2)
+
+                px = px.clamp(0, 255)
+                py = py.clamp(0, 255)
+
+                B, T = imgs.shape[0], imgs.shape[1]
+
+                # coords: (B,T,1,2), labels: (B,1)
+                coords = torch.zeros((B, T, 1, 2), dtype=torch.float32, device=opt.device)
+                labels = torch.ones((B, 1), dtype=torch.int64, device=opt.device)
+
+                # 只给第0帧中心点，后续帧不再给点
+                coords[:, 0, 0, 0] = px
+                coords[:, 0, 0, 1] = py
+
+                pt_dino = (coords, labels)
+
+                print(
+                    "[DINO POINT][EVAL]",
+                    "boxes_n =", len(boxes),
+                    "best_box =", best_box.detach().cpu().tolist(),
+                    "point_xy =", [float(px.detach().cpu()), float(py.detach().cpu())],
+                    "score =", float(scores[best].detach().cpu())
+                )
+            else:
+                print("[DINO POINT][EVAL] no box found, use no point prompt")
+
         start = time.time()
         with torch.no_grad():
-            pred = model(imgs, None, None)
+            pred = _bidirectional_endpoint_forward(model, imgs, pt_dino, args)
         end = time.time()
         print('infer_time:', (end-start))
         sum_time = sum_time + (end-start)
@@ -608,12 +803,14 @@ def eval_camus(valloader, model, criterion, opt, args):
         # seg = predict > 0.6
         pred_prob = torch.sigmoid(pred[:,:,0,:,:])
         pred_prob = pred_prob.detach().cpu().numpy()
-        seg = pred_prob > getattr(args, "seg_threshold", 0.6)
+        seg = pred_prob > 0.6
         seg_mask = np.zeros_like(gt)
         seg_mask[seg] = 1
-        if patient_name not in mask_dict:
-            mask_dict[patient_name] = {}
-        mask_dict[patient_name][view] = {'ED':seg_mask[0,0], 'ES':seg_mask[0,-1],'spacing':spcaing}
+        if getattr(args, 'compute_ef', False):
+            record_camus_endpoints(
+                mask_dict, gt_efs, image_filename,
+                datapack['ef'].detach().cpu().numpy(), spcaing, seg_mask,
+            )
 
         b, t, h, w = seg.shape
 
@@ -633,12 +830,10 @@ def eval_camus(valloader, model, criterion, opt, args):
                 # medpy
                 # med_hd = medpy_hd(pred_i[0], gt_i[0], voxelspacing=spcaing)
                 if opt.mode == "test":
-                    try:
-                        med_hd95 = medpy_hd95(pred_i[0], gt_i[0], voxelspacing=spcaing)
-                        med_assd = medpy_assd(pred_i[0], gt_i[0], voxelspacing=spcaing)
-                    except:
-                        print(pred_i[0], gt_i[0])
-                        raise RuntimeError
+                    med_hd95, med_assd = _safe_surface_metrics(
+                        pred_i[0], gt_i[0], voxelspacing=spcaing,
+                        context=f'{image_filename[j]} frame={frame_i}',
+                    )
                     hds.append(med_hd95)
                     assds.append(med_assd)
                 tps.append(tp)
@@ -661,7 +856,7 @@ def eval_camus(valloader, model, criterion, opt, args):
     #return dices, mean_dice, val_losses
     if opt.mode == "train":
         dices = np.mean(patient_dices, axis=0)  # c
-        hdis = np.mean(hds, axis=0)
+        hdis = np.mean(hds, axis=0) if len(hds) else 0.0
         val_losses = val_losses / (batch_idx + 1)
         mean_dice = dices[0]
         mean_hdis = hdis
@@ -677,57 +872,8 @@ def eval_camus(valloader, model, criterion, opt, args):
         iou_std = np.std(iou, axis=0)
         assd_mean = np.mean(assds, axis=0)
         assd_std = np.std(assds, axis=0)
-        if args.compute_ef:
-            # compute ef
-            pred_efs = {}
-            for patient_name in mask_dict:
-                a2c_ed = mask_dict[patient_name]['2CH']['ED']
-                a2c_es = mask_dict[patient_name]['2CH']['ES']
-                a2c_voxelspacing = mask_dict[patient_name]['2CH']['spacing']
-                a4c_ed = mask_dict[patient_name]['4CH']['ED']
-                a4c_es = mask_dict[patient_name]['4CH']['ES']
-                a4c_voxelspacing = mask_dict[patient_name]['4CH']['spacing']
-                edv, esv = compute_left_ventricle_volumes(
-                    a2c_ed=a2c_ed,
-                    a2c_es=a2c_es,
-                    a2c_voxelspacing=a2c_voxelspacing,
-                    a4c_ed=a4c_ed,
-                    a4c_es=a4c_es,
-                    a4c_voxelspacing=a4c_voxelspacing,
-                )
-                if esv > edv:
-                    edv, esv = esv, edv
-                ef = round(100 * (edv - esv) / edv, 2)
-                pred_efs[patient_name] = ef
-                print(patient_name, pred_efs[patient_name], gt_efs[patient_name])
-
-            gt_ef_array = list(gt_efs.values())
-            pred_ef_array = list(pred_efs.values())
-            # gt_ef_array = [round(i) for i in gt_ef_array]
-            # pred_ef_array = [round(i) for i in pred_ef_array]
-            gt_ef_array = np.array(gt_ef_array)
-            pred_ef_array = np.array(pred_ef_array)
-            print(
-                'bias:', bias(gt_ef_array,pred_ef_array),
-                'std:', std(pred_ef_array),
-                'corr', corr(gt_ef_array,pred_ef_array)
-            )
-            corr_bootstrap = bootstrap_corr(gt_ef_array, pred_ef_array)
-            print(
-                'corr_bootstrap:',
-                f"{corr_bootstrap['mean']:.8f}+/-{corr_bootstrap['std']:.8f}",
-                'corr_bootstrap(%):',
-                f"{100 * corr_bootstrap['mean']:.4f}+/-{100 * corr_bootstrap['std']:.4f}",
-                '95%CI:',
-                f"[{corr_bootstrap['ci95_lower']:.8f}, {corr_bootstrap['ci95_upper']:.8f}]",
-                'repeats:',
-                f"{corr_bootstrap['valid_repeats']}/{corr_bootstrap['repeats']}",
-                'seed:', corr_bootstrap['seed'],
-            )
-            wilcoxon_rank_sum_test = stats.mannwhitneyu(gt_ef_array ,pred_ef_array)
-            wilcoxon_signed_rank_test = stats.wilcoxon(gt_ef_array ,pred_ef_array)
-            print(wilcoxon_rank_sum_test)
-            print(wilcoxon_signed_rank_test)
+        if getattr(args, 'compute_ef', False):
+            save_camus_lvef(mask_dict, gt_efs, args, opt, compute_left_ventricle_volumes)
         return dice_mean, iou_mean, hd_mean, assd_mean, dices_std, iou_std, hd_std, assd_std
 
 
@@ -743,6 +889,9 @@ def eval_echonet(valloader, model, criterion, opt, args):
         imgs = Variable(datapack['image'].to(dtype = torch.float32, device=opt.device))
         masks = Variable(datapack['label'].to(dtype = torch.float32, device=opt.device))
         spcaing = datapack['spacing'].detach().cpu().numpy()[0,:2][::-1] # remove z and reverse (y,x)
+        spacing_scale = _get_eval_spacing_scale(args)
+        if abs(spacing_scale - 1.0) > 1e-6:
+            spcaing = spcaing * spacing_scale
         # video to image
         # b, t, c, h, w = imgs.shape
 
@@ -750,13 +899,16 @@ def eval_echonet(valloader, model, criterion, opt, args):
         image_name = image_filename[0].split(".")[0]
 
         # gt_efs[image_name] = datapack['ef'].detach().cpu().numpy()[0]
-        # if args.enable_point_prompt:
-        #     # pt[0]: b t 1 2
-        #     # pt[1]: t 1
-        import time
+        pt_dino = None
+
+        # Keep the same evaluation prompt policy as CAMUS:
+        # no manual/GT click prompt; SharedGroundedMemSAM grounds the first
+        # frame internally with DINO when pt_dino is None.
+        pt = None
+
         start = time.time()
         with torch.no_grad():
-            pred = model(imgs, None, None)
+            pred = _bidirectional_endpoint_forward(model, imgs, pt_dino, args)
         end = time.time()
         sum_time = sum_time +(end-start)
         print('infer_time:', end-start)
@@ -765,22 +917,22 @@ def eval_echonet(valloader, model, criterion, opt, args):
         if opt.semi:
             pred = pred[:,[0,-1]]
             masks = masks[:,[0,-1]]
+            es_loss_weight = float(getattr(args, "es_loss_weight", 1.0))
+            if abs(es_loss_weight - 1.0) > 1e-6:
+                ed_loss = criterion(pred[:, [0], 0, :, :], masks[:, [0]])
+                es_loss = criterion(pred[:, [-1], 0, :, :], masks[:, [-1]])
+                val_loss = (ed_loss + es_loss_weight * es_loss) / (1.0 + es_loss_weight)
+            else:
+                val_loss = criterion(pred[:, :, 0], masks)
         else:
-            # insert fake frame
-            masks_zero = torch.zeros_like(pred,dtype=torch.uint8)
-            masks_zero = masks_zero[:,:,0]
-            masks_zero[:,0] = masks[:,0]
-            masks_zero[:,-1] = masks[:,-1]
-            masks = masks_zero
+            val_loss = criterion(pred[:,:,0], masks)
 
-        # val_loss = criterion(pred[:,:,0], masks)
-        # val_losses += val_loss.item()
+        val_losses += val_loss.item()
 
         gt = masks.detach().cpu().numpy()
-        predict = F.sigmoid(pred[:,:,0,:,:])
-        predict = predict.detach().cpu().numpy()  # (b, t, h, w)
-        seg = predict > getattr(args, "seg_threshold", 0.6)
-
+        pred_prob = torch.sigmoid(pred[:,:,0,:,:])
+        pred_prob = pred_prob.detach().cpu().numpy()
+        seg = pred_prob > _get_seg_threshold(args)
         seg_mask = np.zeros_like(gt)
         seg_mask[seg] = 1
         if image_name not in mask_dict:
@@ -798,8 +950,6 @@ def eval_echonet(valloader, model, criterion, opt, args):
                 gt_i[gt[j:j+1, frame_i, :, :] == 1] = 255
                 tp, fp, tn, fn = metrics.get_matrix(pred_i, gt_i)
 
-                dice = (2 * tp + 1e-5) / (2 * tp + fp + fn + 1e-5)
-                print(dice)
                 if opt.visual:
                     visual_segmentation_npy(pred_i[0, ...],
                                             gt_i[0, ...],
@@ -816,22 +966,34 @@ def eval_echonet(valloader, model, criterion, opt, args):
                 # our_hd_95 = our_hausdorff_distance(pred_i[0], gt_i[0], percentile=95)
                 # medpy
                 # med_hd = medpy_hd(pred_i[0], gt_i[0], voxelspacing=spcaing)
-                try:
-                    med_hd95 = medpy_hd95(pred_i[0], gt_i[0], voxelspacing=spcaing)
-                    med_assd = medpy_assd(pred_i[0], gt_i[0], voxelspacing=spcaing)
-                except:
-                    print(pred_i[0], gt_i[0])
-                    raise RuntimeError
-                # print(med_hd95)
-                # print(med_assd)
-                hds.append(med_hd95)
-                assds.append(med_assd)
+                if opt.mode == "test":
+                    med_hd95, med_assd = _safe_surface_metrics(
+                        pred_i[0],
+                        gt_i[0],
+                        voxelspacing=spcaing,
+                        context=f"{image_filename[j]} frame={frame_i}",
+                    )
+                    hds.append(med_hd95)
+                    assds.append(med_assd)
                 tps.append(tp)
                 fps.append(fp)
                 tns.append(tn)
                 fns.append(fn)
                 dice = (2 * tp + 1e-5) / (2 * tp + fp + fn + 1e-5)
                 print(dice)
+                _print_low_dice_case(dice, pred_prob[j:j+1], seg[j:j+1], gt[j:j+1], image_filename[j], frame_i, args)
+                if opt.mode == "test":
+                    _print_high_hd_case(
+                        med_hd95,
+                        med_assd,
+                        dice,
+                        pred_prob[j:j+1],
+                        seg[j:j+1],
+                        gt[j:j+1],
+                        image_filename[j],
+                        frame_i,
+                        args,
+                    )
 
     print(sum_time / len(valloader))
     tps = np.array(tps)
@@ -842,7 +1004,7 @@ def eval_echonet(valloader, model, criterion, opt, args):
     #return dices, mean_dice, val_losses
     if opt.mode == "train":
         dices = np.mean(patient_dices, axis=0)  # c
-        hdis = np.mean(hds, axis=0)
+        hdis = np.mean(hds, axis=0) if len(hds) else 0.0
         val_losses = val_losses / (batch_idx + 1)
         mean_dice = dices[0]
         mean_hdis = hdis
@@ -860,58 +1022,11 @@ def eval_echonet(valloader, model, criterion, opt, args):
         iou_std = np.std(iou, axis=0)
         assd_mean = np.mean(assds, axis=0)
         assd_std = np.std(assds, axis=0)
-        if args.compute_ef:
-            # compute ef
-            pred_efs = {}
-            for patient_name in mask_dict:
-                a2c_ed = mask_dict[patient_name]['2CH']['ED']
-                a2c_es = mask_dict[patient_name]['2CH']['ES']
-                a2c_voxelspacing = mask_dict[patient_name]['2CH']['spacing']
-                a4c_ed = mask_dict[patient_name]['4CH']['ED']
-                a4c_es = mask_dict[patient_name]['4CH']['ES']
-                a4c_voxelspacing = mask_dict[patient_name]['4CH']['spacing']
-                edv, esv = compute_left_ventricle_volumes(
-                    a2c_ed=a2c_ed,
-                    a2c_es=a2c_es,
-                    a2c_voxelspacing=a2c_voxelspacing,
-                    a4c_ed=a4c_ed,
-                    a4c_es=a4c_es,
-                    a4c_voxelspacing=a4c_voxelspacing,
-                )
-                ef = round(100 * (edv - esv) / edv, 2)
-                pred_efs[patient_name] = ef
-                print(patient_name, pred_efs[patient_name], gt_efs[patient_name])
-
-            gt_ef_array = list(gt_efs.values())
-            pred_ef_array = list(pred_efs.values())
-            # gt_ef_array = [round(i) for i in gt_ef_array]
-            # pred_ef_array = [round(i) for i in pred_ef_array]
-            gt_ef_array = np.array(gt_ef_array)
-            pred_ef_array = np.array(pred_ef_array)
-            print(
-                'bias:', bias(gt_ef_array,pred_ef_array),
-                'std:', std(pred_ef_array),
-                'corr', corr(gt_ef_array,pred_ef_array)
-            )
-            corr_bootstrap = bootstrap_corr(gt_ef_array, pred_ef_array)
-            print(
-                'corr_bootstrap:',
-                f"{corr_bootstrap['mean']:.8f}+/-{corr_bootstrap['std']:.8f}",
-                'corr_bootstrap(%):',
-                f"{100 * corr_bootstrap['mean']:.4f}+/-{100 * corr_bootstrap['std']:.4f}",
-                '95%CI:',
-                f"[{corr_bootstrap['ci95_lower']:.8f}, {corr_bootstrap['ci95_upper']:.8f}]",
-                'repeats:',
-                f"{corr_bootstrap['valid_repeats']}/{corr_bootstrap['repeats']}",
-                'seed:', corr_bootstrap['seed'],
-            )
-            wilcoxon_rank_sum_test = stats.mannwhitneyu(gt_ef_array ,pred_ef_array)
-            wilcoxon_signed_rank_test = stats.wilcoxon(gt_ef_array ,pred_ef_array)
-            print(wilcoxon_rank_sum_test)
-            print(wilcoxon_signed_rank_test)
+        # Echo has no paired 2CH/4CH views for the CAMUS biplane protocol.
         return dice_mean, iou_mean, hd_mean, assd_mean, dices_std, iou_std, hd_std, assd_std
 
 def get_eval(valloader, model, criterion, opt, args):
+    validate_clinical_request(args, opt)
     if args.modelname == "SAMed":
         if opt.eval_mode == "camusmulti":
             opt.eval_mode = "camus_samed"

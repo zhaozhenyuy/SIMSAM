@@ -22,6 +22,10 @@ from einops import rearrange
 import random
 
 
+def _tensor_pair(image, mask):
+    return torch.tensor(image), torch.tensor(mask)
+
+
 def load_video_and_mask_file(img_path: str,
                              anno_path: str,
                              frame_length: int = 10):
@@ -574,7 +578,7 @@ class ImageToImage2D(Dataset):
             self.joint_transform = joint_transform
         else:
             to_tensor = T.ToTensor()
-            self.joint_transform = lambda x, y: (to_tensor(x), to_tensor(y))
+            self.joint_transform = _tensor_pair
 
     def __len__(self):
         return len(self.ids)
@@ -708,7 +712,7 @@ class EchoDataset(Dataset):
             self.joint_transform = joint_transform
         else:
             to_tensor = T.ToTensor()
-            self.joint_transform = lambda x, y: (to_tensor(x), to_tensor(y))
+            self.joint_transform = _tensor_pair
 
     def __len__(self):
         return len(self.ids)
@@ -791,12 +795,14 @@ class EchoVideoDataset(Dataset):
                  one_hot_mask: int = False,
                  frame_length: int = 2,
                  disable_point_prompt: bool = True,
+                 class_key: str = None,
                  point_numbers: int = 1) -> None:
         self.dataset_path = dataset_path
         self.one_hot_mask = one_hot_mask
         self.split = split
         self.frame_length = frame_length
         self.point_numbers = point_numbers
+        self.class_key = class_key
         self.ids = []
         for _, _, files in os.walk(os.path.join(dataset_path, 'videos',
                                                 split)):
@@ -811,12 +817,21 @@ class EchoVideoDataset(Dataset):
         self.class_dict_file = os.path.join(dataset_path, 'class.json')
         with open(self.class_dict_file, 'r') as load_f:
             self.class_dict = json.load(load_f)
+        if self.class_key is None or self.class_key not in self.class_dict:
+            if 'camus' in self.class_dict:
+                self.class_key = 'camus'
+            elif 'EchoNet' in self.class_dict:
+                self.class_key = 'EchoNet'
+            elif 'EchoDynamic' in self.class_dict:
+                self.class_key = 'EchoDynamic'
+            else:
+                self.class_key = next(iter(self.class_dict))
         if joint_transform:
             self.joint_transform = joint_transform
         else:
             # to_tensor = T.ToTensor()
             to_tensor = torch.tensor
-            self.joint_transform = lambda x, y: (to_tensor(x), to_tensor(y))
+            self.joint_transform = _tensor_pair
 
     def __len__(self):
         return len(self.ids)
@@ -824,7 +839,7 @@ class EchoVideoDataset(Dataset):
     def __getitem__(self, i):
         filename = self.ids[i]
         prefix, _ = os.path.splitext(filename)
-        sub_path = 'camus'
+        sub_path = self.class_key
         class_id = 1
 
         img_path = os.path.join(os.path.join(self.dataset_path, 'videos'), self.split)

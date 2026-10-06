@@ -1,5 +1,6 @@
 import torchvision
 import os
+from pathlib import Path
 import torch
 import cv2
 import numpy as np
@@ -9,6 +10,13 @@ import matplotlib.pyplot as plt
 from utils.imgname import read_img_name
 import seaborn as sns
 from utils.tools import draw_sem_seg_by_cv2_sum
+
+
+def _write_image(filename, image):
+    success, encoded = cv2.imencode(Path(filename).suffix, image)
+    if not success:
+        raise RuntimeError(f'Cannot encode visualization: {filename}')
+    encoded.tofile(filename)
 
 def visual_segmentation(seg, image_filename, opt):
     img_ori = cv2.imread(os.path.join(opt.data_path + '/images', 'test', image_filename))
@@ -43,7 +51,7 @@ def visual_segmentation(seg, image_filename, opt):
     fulldir = opt.result_path + "/vis/" + opt.modelname + "/"
     if not os.path.isdir(fulldir):
         os.makedirs(fulldir)
-    cv2.imwrite(fulldir + image_filename, img)
+    _write_image(fulldir + image_filename, img)
 
 def visual_segmentation_npy(pred, gt, image_filename, opt, img_ori, frameidx:int):
     palette = [[255, 255, 255],[37, 143, 36], [178, 48, 0], [178, 151, 0]]
@@ -55,11 +63,10 @@ def visual_segmentation_npy(pred, gt, image_filename, opt, img_ori, frameidx:int
     img = draw_sem_seg_by_cv2_sum(img_ori, gt, pred, palette)      
     img = cv2.cvtColor(img.transpose(1,2,0), cv2.COLOR_RGB2BGR)
 
-    fulldir = os.path.join(opt.result_path, "vis", opt.modelname)
+    fulldir = opt.result_path + "vis/" + opt.modelname + "/"
     if not os.path.isdir(fulldir):
         os.makedirs(fulldir)
-    output_name = image_filename.split('.')[0] + f'_{frameidx}.png'
-    cv2.imwrite(os.path.join(fulldir, output_name), img)
+    _write_image(fulldir + image_filename.split('.')[0] + f'_{frameidx}.png', img)
 
 def visual_segmentation_sets(seg, image_filename, opt):
     img_path = os.path.join(opt.data_subpath + '/img', image_filename)
@@ -92,7 +99,7 @@ def visual_segmentation_sets(seg, image_filename, opt):
     #fulldir = opt.result_path + "/" + "GT" + "/"
     if not os.path.isdir(fulldir):
         os.makedirs(fulldir)
-    cv2.imwrite(fulldir + image_filename, img)
+    _write_image(fulldir + image_filename, img)
 
 def visual_segmentation_sets_with_pt(seg, image_filename, opt, pt):
     img_path = os.path.join(opt.data_subpath + '/img', image_filename)
@@ -133,7 +140,7 @@ def visual_segmentation_sets_with_pt(seg, image_filename, opt, pt):
     #fulldir = opt.result_path + "/PT3-" + "img" + "/"
     if not os.path.isdir(fulldir):
         os.makedirs(fulldir)
-    cv2.imwrite(fulldir + image_filename, img)
+    _write_image(fulldir + image_filename, img)
 
 def visual_segmentation_binary(seg, image_filename, opt):
     img_ori = cv2.imread(os.path.join(opt.data_path + '/img', image_filename))
@@ -157,4 +164,4 @@ def visual_segmentation_binary(seg, image_filename, opt):
     fulldir = opt.visual_result_path + "/" + opt.modelname + "/"
     if not os.path.isdir(fulldir):
         os.makedirs(fulldir)
-    cv2.imwrite(fulldir + image_filename, overlay)
+    _write_image(fulldir + image_filename, overlay)

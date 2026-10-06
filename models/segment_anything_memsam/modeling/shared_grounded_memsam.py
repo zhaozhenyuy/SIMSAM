@@ -44,9 +44,7 @@ class DINOToSAMAdapter(nn.Module):
             ]
         )
         self.apfe = (
-            nn.ModuleList(
-                [APFE(out_channels, kernel_size=apfe_kernel_size) for _ in in_channels]
-            )
+            nn.ModuleList([APFE(out_channels, kernel_size=apfe_kernel_size) for _ in in_channels])
             if enable_apfe
             else None
         )
@@ -99,8 +97,10 @@ class SharedGroundedMemSAM(nn.Module):
         caption: str = "left ventricle",
         box_threshold: float = 0.35,
         freeze_dino: bool = True,
+        disable_dino_prompt: bool = False,
         enable_phase_memory: bool = False,
         phase_memory_scale: float = 0.1,
+        reset_reinforce_state_per_video: bool = False,
     ) -> None:
         super().__init__()
         self.dino_model = dino_model
@@ -110,6 +110,8 @@ class SharedGroundedMemSAM(nn.Module):
         self.memory = memory
         self.caption = _preprocess_caption(caption)
         self.box_threshold = box_threshold
+        self.disable_dino_prompt = disable_dino_prompt
+        self.reset_reinforce_state_per_video = reset_reinforce_state_per_video
         self.last_grounding: Optional[Dict[str, torch.Tensor]] = None
         self.phase_memory = (
             nn.Sequential(
@@ -284,9 +286,13 @@ class SharedGroundedMemSAM(nn.Module):
         return_prompts: bool = False,
     ) -> torch.Tensor:
         self.last_grounding = None
+        if self.reset_reinforce_state_per_video and self.memory is not None:
+            reset_fn = getattr(self.memory, "reset_reinforce_state", None)
+            if reset_fn is not None:
+                reset_fn()
         image_embeddings, features, positions = self._encode_shared_features(imgs)
 
-        if pt is None:
+        if pt is None and not self.disable_dino_prompt:
             batch_size, frame_count = imgs.shape[:2]
             first_features, first_positions = self._select_first_frame_features(
                 features,
@@ -296,7 +302,9 @@ class SharedGroundedMemSAM(nn.Module):
             )
             pt, _ = self._ground_first_frame(imgs[:, 0], first_features, first_positions)
 
-        if self.memory is not None:
+        if self.memory is not None and getattr(self.memory, "use_osu_state", False):
+            pred = self._forward_with_osu_state_embeddings(imgs, image_embeddings, pt)
+        elif self.memory is not None:
             pred = self._forward_with_memory_embeddings(imgs, image_embeddings, pt)
         else:
             pred = self._forward_without_memory_embeddings(imgs, image_embeddings, pt)
@@ -333,6 +341,73 @@ class SharedGroundedMemSAM(nn.Module):
             )
             mask = F.interpolate(mask, (height, width), mode="bilinear", align_corners=False)
             frames_pred.append(mask)
+
+        return torch.stack(frames_pred, dim=1)
+
+    def _forward_with_osu_state_embeddings(
+        self,
+        imgs: torch.Tensor,
+        image_embeddings: torch.Tensor,
+        pt: Optional[Tuple[torch.Tensor, torch.Tensor]],
+    ) -> torch.Tensor:
+        batch_size, frame_count, _, height, width = imgs.shape
+        key, _, _ = self._project_memory_keys(image_embeddings, need_sk=False, need_ek=False)
+        hidden = torch.zeros(
+            (batch_size, 1, self.memory.hidden_dim, *key.shape[-2:]),
+            device=image_embeddings.device,
+        )
+        points = None if pt is None else (pt[0], pt[1])
+
+        sparse_embeddings, dense_embeddings = self.prompt_encoder(
+            points=points,
+            boxes=None,
+            masks=None,
+        )
+        mask, _ = self.mask_decoder(
+            image_embeddings=image_embeddings[:, 0],
+            image_pe=self.prompt_encoder.get_dense_pe(),
+            sparse_prompt_embeddings=sparse_embeddings,
+            dense_prompt_embeddings=dense_embeddings,
+            multimask_output=False,
+        )
+        mask = F.interpolate(mask, (height, width), mode="bilinear", align_corners=False)
+
+        value, hidden = self.memory("encode_value", imgs[:, 0], image_embeddings[:, 0], hidden, mask)
+        state = self.memory(
+            "init_osu_state",
+            batch_size,
+            value.shape[1],
+            image_embeddings.device,
+            image_embeddings.dtype,
+        )
+        state = self.memory("update_osu_state", state, key[:, :, 0], value)
+
+        frames_pred = []
+        for frame_index in range(frame_count):
+            frame_embedding = image_embeddings[:, frame_index]
+            memory_readout = self.memory("read_osu_state", state, key[:, :, frame_index])
+            hidden, memory_embedding = self.memory("decode", frame_embedding, hidden, memory_readout)
+            mask, _ = self.mask_decoder(
+                image_embeddings=frame_embedding,
+                image_pe=self.prompt_encoder.get_dense_pe(),
+                sparse_prompt_embeddings=None,
+                dense_prompt_embeddings=memory_embedding[:, 0],
+                multimask_output=False,
+            )
+            mask = F.interpolate(mask, (height, width), mode="bilinear", align_corners=False)
+            frames_pred.append(mask)
+
+            if frame_index < frame_count - 1:
+                is_deep_update = torch.rand((), device=image_embeddings.device).item() < 0.2
+                value, hidden = self.memory(
+                    "encode_value",
+                    imgs[:, frame_index],
+                    frame_embedding,
+                    hidden,
+                    mask,
+                    is_deep_update=is_deep_update,
+                )
+                state = self.memory("update_osu_state", state, key[:, :, frame_index], value)
 
         return torch.stack(frames_pred, dim=1)
 

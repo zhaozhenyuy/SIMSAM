@@ -1,0 +1,22 @@
+data:
+  train_dir: data/echodynamic_dino/test/images
+  train_ann: data/echodynamic_dino/test/test.csv
+  val_dir: data/echodynamic_dino/test/images
+  val_ann: data/echodynamic_dino/test/test.csv
+  batch_size: 1
+  num_workers: 1
+
+model:
+  config_path: groundingdino/config/GroundingDINO_SwinT_OGC.py
+  weights_path: weights/groundingdino_swint_ogc.pth
+  lora_weights: weights/echodynamic/best_model.pth
+
+training:
+  num_epochs: 1
+  learning_rate: 1e-3
+  save_dir: weights/echodynamic
+  save_frequency: 5
+  warmup_epochs: 5
+  use_lora: true
+  visualization_frequency: 5
+  patient: 350

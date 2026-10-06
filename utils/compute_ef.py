@@ -11,7 +11,7 @@ import numpy as np
 import PIL
 import SimpleITK as sitk
 from PIL.Image import Resampling
-from skimage.measure import find_contours
+from skimage.measure import find_contours, label
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +72,7 @@ def compute_left_ventricle_volumes(
     a4c_ed: np.ndarray,
     a4c_es: np.ndarray,
     a4c_voxelspacing: Tuple[float, float],
+    component_policy: str = "largest",
 ) -> Tuple[float, float]:
     """Computes the ED and ES volumes of the left ventricle from 2 orthogonal 2D views (A2C and A4C).
 
@@ -99,10 +100,10 @@ def compute_left_ventricle_volumes(
                 f"to extract the binary LV segmentation from a multi-class segmentation mask."
             )
 
-    a2c_ed_diameters, a2c_ed_step_size = _compute_diameters(a2c_ed, a2c_voxelspacing)
-    a2c_es_diameters, a2c_es_step_size = _compute_diameters(a2c_es, a2c_voxelspacing)
-    a4c_ed_diameters, a4c_ed_step_size = _compute_diameters(a4c_ed, a4c_voxelspacing)
-    a4c_es_diameters, a4c_es_step_size = _compute_diameters(a4c_es, a4c_voxelspacing)
+    a2c_ed_diameters, a2c_ed_step_size = _compute_diameters(a2c_ed, a2c_voxelspacing, component_policy)
+    a2c_es_diameters, a2c_es_step_size = _compute_diameters(a2c_es, a2c_voxelspacing, component_policy)
+    a4c_ed_diameters, a4c_ed_step_size = _compute_diameters(a4c_ed, a4c_voxelspacing, component_policy)
+    a4c_es_diameters, a4c_es_step_size = _compute_diameters(a4c_es, a4c_voxelspacing, component_policy)
     step_size = max((a2c_ed_step_size, a2c_es_step_size, a4c_ed_step_size, a4c_es_step_size))
 
     ed_volume = _compute_left_ventricle_volume_by_instant(a2c_ed_diameters, a4c_ed_diameters, step_size)
@@ -156,9 +157,10 @@ def _find_distance_to_edge(
 
 def _distance_line_to_points(line_point_0: np.ndarray, line_point_1: np.ndarray, points: np.ndarray) -> np.ndarray:
     # https://en.wikipedia.org/wiki/Distance_from_a_point_to_a_line
-    return np.absolute(np.cross(line_point_1 - line_point_0, line_point_0 - points)) / np.linalg.norm(
-        line_point_1 - line_point_0
-    )
+    vector = line_point_1 - line_point_0
+    offsets = line_point_0 - points
+    cross_product = vector[0] * offsets[:, 1] - vector[1] * offsets[:, 0]
+    return np.absolute(cross_product) / np.linalg.norm(vector)
 
 
 def _get_angle_of_lines_to_point(reference_point: np.ndarray, moving_points: np.ndarray) -> np.ndarray:
@@ -166,7 +168,11 @@ def _get_angle_of_lines_to_point(reference_point: np.ndarray, moving_points: np.
     return abs(np.degrees(np.arctan2(diff[:, 0], diff[:, 1])))
 
 
-def _compute_diameters(segmentation: np.ndarray, voxelspacing: Tuple[float, float]) -> Tuple[np.ndarray, float]:
+def _compute_diameters(
+    segmentation: np.ndarray,
+    voxelspacing: Tuple[float, float],
+    component_policy: str = "largest",
+) -> Tuple[np.ndarray, float]:
     """
 
     Args:
@@ -180,8 +186,22 @@ def _compute_diameters(segmentation: np.ndarray, voxelspacing: Tuple[float, floa
     # The spacing can be multiplied by the diameter directly.
     segmentation, isotropic_spacing = resize_image_to_isotropic(segmentation, voxelspacing)
 
+    if component_policy == "largest":
+        components = label(np.asarray(segmentation, dtype=bool), connectivity=1)
+        counts = np.bincount(components.reshape(-1))
+        counts[0] = 0
+        largest = int(np.argmax(counts))
+        if largest == 0:
+            raise ValueError("No foreground component was found in the predicted mask")
+        segmentation = (components == largest).astype(np.uint8)
+    elif component_policy != "first":
+        raise ValueError(f"Unknown LVEF component policy: {component_policy!r}")
+
     # Go through entire contour to find AV plane
-    contour = find_contours(segmentation, 0.5)[0]
+    contours = find_contours(segmentation, 0.5)
+    if not contours:
+        raise ValueError("No contour was found in the predicted mask")
+    contour = contours[0]
 
     # For each pair of contour points
     # Check if angle is ok

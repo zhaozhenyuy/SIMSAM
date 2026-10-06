@@ -1,29 +1,9 @@
-__pycache__/
-*.py[cod]
-*.so
-*.pyd
-*.egg-info/
-.ipynb_checkpoints/
-
-# Datasets, weights, and generated outputs
-data/
-weights/
-checkpoints/
-results/
 result/
-runs/
+result
+checkpoints/
+checkpoints
+dataset/
 tensorboard/
-*.pth
-*.pt
-*.ckpt
-*.log
-
-# Local environments and editors
-.venv/
-venv/
-.idea/
-.vscode/
-
-# Legacy SAM utilities are not used by the SIMSAM release model.
-models/segment_anything/
-models/segment_anything_memsam/utils/
+__pycache__/
+test_imgs/
+temp_dir

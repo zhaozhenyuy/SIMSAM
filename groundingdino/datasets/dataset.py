@@ -24,11 +24,12 @@ class GroundingDINODataset(Dataset):
         """
         Read dataset annotations and convert to [x,y,w,h] format
         """
-        ann_dict = defaultdict(lambda: defaultdict(list))
+        ann_dict = {}
         with open(ann_file) as file_obj:
             ann_reader = csv.DictReader(file_obj)
             for row in ann_reader:
                 img_path = os.path.join(img_dir, row['image_name'])
+                ann_dict.setdefault(img_path, {'boxes': [], 'phrases': []})
                 # Store in [x,y,w,h] format directly
                 x = int(row['bbox_x'])
                 y = int(row['bbox_y'])

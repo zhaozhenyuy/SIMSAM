@@ -65,7 +65,7 @@ class ConfigurationManager:
     @staticmethod
     def load_config(config_path: str) -> tuple[DataConfig, ModelConfig, TrainingConfig]:
         """Load configuration from YAML file with type conversion"""
-        with open(config_path, 'r') as f:
+        with open(config_path, 'r', encoding='utf-8') as f:
             config = yaml.safe_load(f)
             
         try:
@@ -76,4 +76,3 @@ class ConfigurationManager:
             raise ValueError(f"Invalid configuration format: {str(e)}")
         
         return data_config, model_config, training_config
-
